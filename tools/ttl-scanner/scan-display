@@ -1,0 +1,669 @@
+#!/usr/bin/env python3
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+"""
+Script to analyze the output of find-horiz-scans and create
+summary output for all of the scans, and plots for scans that
+might look "interesting" (i.e. they have multiple TTLs, and
+other interesting aspects)
+
+usage: scan-display [-d PATH] FNAME [FNAME ...]
+
+The -d parameter specifies the directory where the images should be
+written.
+
+Other parameters:
+
+    -q -- omit the TTL values from the images, showing only the colors
+
+    -I -- omit "uninteresting" patterns, according to the heuristics
+        for finding symmetry
+
+    -H -- display the hashes of the TTL values at the end of the
+        output display.  There are two hashes: the first is the
+        hash of the string of the display values (which are used
+        to pick the colors used by the display), and the second
+        is the hash of the string of the normalized TTL values
+        (all of the TTL values, with the smallest TTL value minus
+        1 subtracted from all of the values.
+
+        Note that if the normalized TTL values of two scans are
+        identical, then the hash of the display values should also
+        be identical as well, but not vice versa.  For example,
+        if we had two 4-address scans [2, 2, 2, 6] and [3, 3, 3, 10]]
+        then the colors for both will be [0, 0, 0, 1] but the normalized
+        values will be [1, 1, 1, 5] and [1, 1, 1, 8].
+
+The input filenames are the names of output files created by
+find-horiz-scans.
+
+The summary output is written to stdout.
+"""
+
+
+from argparse import ArgumentParser
+from collections import Counter
+from datetime import datetime
+import hashlib
+import ipaddress
+import os
+import re
+import sys
+
+import numpy as np
+
+from PIL import Image, ImageDraw, ImageFont
+
+def split_matrix(array, nrows=8, ncols=8):
+    """
+    Split a matrix into four sub-matrices.
+
+     -------
+    | A | B |
+    |-------|
+    | C | D |
+     -------
+    """
+    _, height = array.shape
+    return (array.reshape(height // nrows, nrows, -1, ncols)
+                 .swapaxes(1, 2)
+                 .reshape(-1, nrows, ncols))
+
+def matrix_from_list(offset_array, values_array):
+    """
+    Given the offset list and values (TTLs),
+    returns a 16x16 matrix arrangement, mapping
+    the offset to a location on the matrix.
+    """
+
+    assert len(offset_array) == len(values_array), 'both arrays must have the same length'
+    assert len(offset_array) == 256, 'both arrays must be of length 256'
+
+    n_grid = 16
+    space = np.ones((n_grid, n_grid))
+    for off, val in zip(*[offset_array, values_array]):
+        i, j = int(off)//n_grid, int(off) % n_grid
+        space[i][j] = int(val)
+    return space
+
+def are_same(q_1, q_2, diff_threshold = 4):
+    """
+    Compares two binary quadrants, given a threshold,
+    and returns a boolean indicating whether or not
+    the quadrants are the same.
+    """
+    return np.sum(q_1 != q_2) <= diff_threshold
+
+def is_q_contrast(quad, min_q_vals = 8):
+    """
+    Determines if the binary quadrant contains enough contrast, 
+    that is, if it contains enough of both 0s and 1s, conditioned
+    on the min_q_vals parameter.
+
+    Specific for a quadrant that is 8x8.
+    """
+    r_n, c_n = quad.shape
+    assert (r_n == 8) and (r_n == c_n), "quadrant is not 8x8"
+
+    return (64 - np.sum(quad) > min_q_vals) and (np.sum(quad) > min_q_vals)
+
+def pattern_description(ttl_matrix, description = False):
+    """
+    Checks whether certain symmetries were found in the TTL shape matrix.
+
+    For example, given the TTLS [235, 236, 237] for a scan,
+    the TTL groupings would be [235 | 236, 237], [235, 236 | 237],
+    where everything to the left of the bar is represented as zero 
+    and things to the right of the bar are represented as one.   
+
+    Each binary matrix is then divided into four quadrants:
+
+    --------
+    | A | B |
+    |-------|
+    | C | D |
+    --------
+
+    (4 choose 2) Relationships:
+    [(A, B), (A, C), (C, D), (B, D), (A, D), (B, C)]
+
+    Then, each of the quadrant pairs is tested for relationships
+    based on geometric transformations:
+
+    1. Stamp (S): both are the same pattern
+    2. Mirror (M): mirroring one quadrant along a specific axis (x or y),
+        yields the same pattern as the other one (left-right(LR), up-down(UD))
+    3. Rotational (R): rotating one quadrant yields the same pattern
+        as the other one (90, 180, 270)
+
+    Additionally, these are checked on the logical not of one quadrant. This 
+    is indicated below with an n, such that AnB implies the comparison 
+    between A and logical not of B.
+
+    note: there are additional compounds of patterns that this function
+    does not detect, such as a combination of being mirrored and 
+    roated, for example.
+
+    The following is the list of patterns the algorithm detects. For 
+    example, MUD-CD would correspond to the pattern mirror up-down for
+    quadrants C and D. 
+
+    ['S_AB', 'MUD_AB', 'MLR_AB', 'R90_AB', 'R180_AB', 'R270_AB',
+    'S_AC', 'MUD_AC', 'MLR_AC', 'R90_AC', 'R180_AC', 'R270_AC',
+    'S_CD', 'MUD_CD', 'MLR_CD', 'R90_CD', 'R180_CD', 'R270_CD',
+    'S_DB', 'MUD_DB', 'MLR_DB', 'R90_DB', 'R180_DB', 'R270_DB',
+    'S_AD', 'MUD_AD', 'MLR_AD', 'R90_AD', 'R180_AD', 'R270_AD',
+    'S_BC', 'MUD_BC', 'MLR_BC', 'R90_BC', 'R180_BC', 'R270_BC',
+    'S_AnB', 'MUD_AnB', 'MLR_AnB', 'R90_AnB', 'R180_AnB', 'R270_AnB',
+    'S_AnC', 'MUD_AnC', 'MLR_AnC', 'R90_AnC', 'R180_AnC', 'R270_AnC',
+    'S_CnD', 'MUD_CnD', 'MLR_CnD', 'R90_CnD', 'R180_CnD', 'R270_CnD',
+    'S_DnB', 'MUD_DnB', 'MLR_DnB', 'R90_DnB', 'R180_DnB', 'R270_DnB',
+    'S_AnD', 'MUD_AnD', 'MLR_AnD', 'R90_AnD', 'R180_AnD', 'R270_AnD',
+    'S_BnC', 'MUD_BnC', 'MLR_BnC', 'R90_BnC', 'R180_BnC', 'R270_BnC']
+
+    returns: a dictionary
+    """
+
+    # DESCRIPTION
+    descriptions = np.array([
+        'S_AB', 'MUD_AB', 'MLR_AB', 'R90_AB', 'R180_AB', 'R270_AB',
+        'S_AC', 'MUD_AC', 'MLR_AC', 'R90_AC', 'R180_AC', 'R270_AC',
+        'S_CD', 'MUD_CD', 'MLR_CD', 'R90_CD', 'R180_CD', 'R270_CD',
+        'S_DB', 'MUD_DB', 'MLR_DB', 'R90_DB', 'R180_DB', 'R270_DB',
+        'S_AD', 'MUD_AD', 'MLR_AD', 'R90_AD', 'R180_AD', 'R270_AD',
+        'S_BC', 'MUD_BC', 'MLR_BC', 'R90_BC', 'R180_BC', 'R270_BC',
+        'S_AnB', 'MUD_AnB', 'MLR_AnB', 'R90_AnB', 'R180_AnB', 'R270_AnB',
+        'S_AnC', 'MUD_AnC', 'MLR_AnC', 'R90_AnC', 'R180_AnC', 'R270_AnC',
+        'S_CnD', 'MUD_CnD', 'MLR_CnD', 'R90_CnD', 'R180_CnD', 'R270_CnD',
+        'S_DnB', 'MUD_DnB', 'MLR_DnB', 'R90_DnB', 'R180_DnB', 'R270_DnB',
+        'S_AnD', 'MUD_AnD', 'MLR_AnD', 'R90_AnD', 'R180_AnD', 'R270_AnD',
+        'S_BnC', 'MUD_BnC', 'MLR_BnC', 'R90_BnC', 'R180_BnC', 'R270_BnC'])
+
+    # THRESHOLDS:
+
+    # to address small routing differences:
+    # at least min_nttls TTLs must have min_pkts_per_ttl packets
+    min_pkts_per_ttl = 16
+    min_nttls = 2
+
+    # each quadrant must have at least 8 values in either binary division
+    min_q_vals = 8
+
+    # two quadrants are considered equal if
+    # they have at most this many differences
+    diff_threshold=4
+
+    patterns = {}
+    all_ttls = sorted(list(set(ttl_matrix.flatten())))
+
+    if len(all_ttls) == 1:
+        return patterns
+
+    ttls_with_min = np.sum([np.sum(ttl_matrix == ttl) > min_pkts_per_ttl for ttl in all_ttls])
+
+    if ttls_with_min < min_nttls:
+        return patterns
+
+    for ttl_split_i in range(len(all_ttls) - 1):
+
+        ttl_pattern = []
+
+        max_ttl_val = all_ttls[ttl_split_i]
+        bool_matrix = ttl_matrix > max_ttl_val # greater than 1, less than 0
+
+        a_quad, b_quad, c_quad, d_quad = split_matrix(bool_matrix)
+        not_b, not_c, not_d = [np.logical_not(x) for x in [b_quad, c_quad, d_quad]]
+        a_ctrst, b_ctrst, c_ctrst, d_ctrst = [is_q_contrast(x, min_q_vals) for x in [a_quad, b_quad, c_quad, d_quad]]
+
+        all_quadrants = [(a_ctrst, b_ctrst, a_quad, b_quad),
+                         (a_ctrst, c_ctrst, a_quad, c_quad),
+                         (c_ctrst, d_ctrst, c_quad, d_quad),
+                         (b_ctrst, d_ctrst, b_quad, d_quad),
+                         (a_ctrst, d_ctrst, a_quad, d_quad),
+                         (b_ctrst, c_ctrst, b_quad, c_quad),
+                         (a_ctrst, b_ctrst, a_quad, not_b),
+                         (a_ctrst, c_ctrst, a_quad, not_c),
+                         (c_ctrst, d_ctrst, c_quad, not_d),
+                         (b_ctrst, d_ctrst, b_quad, not_d),
+                         (a_ctrst, d_ctrst, a_quad, not_d),
+                         (b_ctrst, c_ctrst, b_quad, not_c)]
+
+        for en_i, en_ii, q_i, q_ii in all_quadrants:
+            if not (en_i and en_ii):
+                ttl_pattern += [0,] * 6
+                continue
+
+            # stamp (could include in rotation, but more often)
+            ttl_pattern.append(1 * are_same(q_i, q_ii, diff_threshold))
+
+            # mirror: left-right
+            ttl_pattern.append(1 * are_same(np.fliplr(q_i), q_ii, diff_threshold))
+
+            # mirror: up-down
+            ttl_pattern.append(1 * are_same(np.flipud(q_i), q_ii, diff_threshold))
+
+            # rotation
+            q_i_rot = q_i
+            for _ in range(3):
+                q_i_rot = np.rot90(q_i_rot)
+                ttl_pattern.append(1 * are_same(q_i_rot, q_ii, diff_threshold))
+
+        if np.any(ttl_pattern):
+            if description:
+                patterns[max_ttl_val] = sorted(list(descriptions[np.where(ttl_pattern)[0]]))
+            else:
+                patterns[max_ttl_val] = sorted(ttl_pattern)
+
+    return patterns
+
+class ValueGrid16x16:
+    """
+    Plot values from a /24 scan in a 16x16 grid
+
+    It looks generalized, but is actually somewhat hardwired to
+    work with the given SCALE (the size of each grid element)
+    and FONT.
+    """
+
+    SCALE = 64
+    DIM = 16
+    SIZE = ((SCALE * DIM), (SCALE * DIM))
+
+    DEFBG = 'white'
+    FONT = ImageFont.truetype('DejaVuSansMono.ttf', 22)
+    COLORS = [
+            ('#000', '#fff'), ('#fff', '#000'),
+            ('#02f', '#ff0'), ('#0f0', '#f0f'), ('#f00', '#0ff'),
+            ('#bbb', '#000'), ('#555', '#fff'), ('#333', '#fff'),
+            ]
+
+    def __init__(self, fname, show_ttls=True):
+
+        self.img = Image.new('RGB', self.SIZE, color=self.DEFBG)
+        self.draw = ImageDraw.Draw(self.img)
+        self.fname = fname
+        self.show_ttls = show_ttls
+
+    def setFileName(self, fname):
+
+        self.fname = fname
+
+    def boxat(self, col, row, colors, text):
+        """
+        Draw a box with the given colors and text and the given x, y
+        coordinates (where 0,0 is the upper left, not the lower right).
+        The colors parameter is a tuple of (bg, fg) colors.
+
+        This looks generalized, but in truth it's hardwired with
+        fudge factors for the 16x16 grid of the given size
+        """
+
+        xll = col * self.SCALE
+        yll = row * self.SCALE
+
+        self.draw.rectangle(
+                ((xll, yll), (xll + self.SCALE, yll + self.SCALE)),
+                fill=colors[0])
+
+        if self.show_ttls:
+            self.draw.text(
+                    (xll + self.SCALE/5, yll + self.SCALE/4),
+                    text, font=self.FONT, fill=colors[1])
+
+    def render(self, ftype='PNG'):
+        """
+        Record the current state of the grid to the given file
+        """
+
+        self.img.save(self.fname, ftype)
+
+    def order_by_offset(self, values, offsets):
+        """
+        Reorder the values by offset into the /24.  For
+        example, if the scan has 8 values [1, 3, 4, 5, 2, 8, 7, 6]
+        and the address offsets (into the subnet) are [8, 7, 6, 5,
+        0, 1, 2, 3] then this returns a new copy of values such
+        that the values are sorted by offset, not arrival order.
+
+        In the case of scans where there are more than one instance
+        of an offset, the value of the first time each offset appears
+        is used (and the later values are discarded).  This means
+        that the new values may be shorter than the input values.
+        """
+
+        # Build the initial array -- if the scan is complete, we
+        # will overwrite all the entries, but this means that we
+        # don't need to worry about the geometry
+        #
+        new_values = [-1] * (self.DIM * self.DIM)
+
+        seen_offsets = set()
+
+        for i in range(len(values)):
+            off = offsets[i]
+            if off not in seen_offsets:
+                new_values[off] = values[i]
+                seen_offsets.add(off)
+
+        return new_values
+
+    def values_to_display(self, values):
+        """
+        Map the values with the highest counts to their rank
+        in the COLORS array.  Anything with a higher rank than
+        the number of COLORS just gets the last one.  In the
+        case of a tie, the tie is broken arbitrarily.
+        """
+
+        val2count = list(Counter(values).items())
+        counts = sorted(val2count, key=lambda v: v[1], reverse=True)
+
+        val2color = dict()
+        val2rank = dict()
+        for i in range(len(counts)):
+            elem = counts[i]
+            val2rank[elem[0]] = i
+            if i < len(self.COLORS):
+                val2color[elem[0]] = self.COLORS[i]
+            else:
+                val2color[elem[0]] = self.COLORS[-1]
+
+        texts = ['%3d' % val for val in values]
+        colors = [val2color[val] for val in values]
+        ranks = [val2rank[val] for val in values]
+
+        return list(zip(texts, colors, ranks))
+
+    def build_image(self, display):
+        """
+        Given a display string, draw the corresponding
+        boxes
+
+        TODO: needs error checking.
+        """
+
+        for row in range(self.DIM):
+            for col in range(self.DIM):
+                text, color, _rank = display[col + (row * self.DIM)]
+                self.boxat(col, row, color, text)
+
+
+class ScanReader:
+    """
+    Read a file of scan summaries (as created by find-horiz-scans)
+    and create summary lines for each, and .png files of scans that
+    look potentially "interesting".
+    """
+
+    def __init__(
+            self, input_fin, output_dname,
+            show_ttls=True, only_interesting=False,
+            include_hashval=False):
+
+        self.fin = input_fin
+        self.dname = output_dname
+        self.show_ttls = show_ttls
+        self.only_interesting = only_interesting
+        self.include_hashval = include_hashval
+
+    def process(self):
+        """
+        The main loop: read self.fin until it is exhausted
+        (or there's an error), processing each scan
+        """
+
+        while True:
+            values = self.scan_record()
+            if not values:
+                return
+
+            val2count = list(Counter(values['ttls']).items())
+            if len(val2count) == 1:
+                # Don't waste time on singletons
+                continue
+
+            if len(values['ttls']) != 256: 
+                continue
+
+            ttl_matrix = matrix_from_list(values['offs'], values['ttls'])
+            pattern = pattern_description(ttl_matrix, description=True) # can change to binary
+
+            if len(pattern) == 0: # no ttl pattern found
+                if self.only_interesting:
+                    continue
+
+                pattern_str = 'NONE'
+            else:
+                pattern_str = dict(
+                        [(k, ",".join(val)) for k, val in pattern.items()])
+
+            max_ttl = max(values['ttls'])
+            min_ttl = min(values['ttls'])
+
+            out_dir = os.path.join(os.path.abspath(self.dname),"pngFiles")
+            #temporary name for initialization until hashes are calculated
+            out_path = os.path.join(out_dir, "tmpName")
+
+            os.makedirs(out_dir, exist_ok=True)
+            grid = ValueGrid16x16(out_path, show_ttls=self.show_ttls)
+            nvals = grid.order_by_offset(values['ttls'], values['offs'])
+            display = grid.values_to_display(nvals)
+
+
+            if self.include_hashval:
+                # The first hash is the hash of the array used to build the display
+                display_str = ', '.join([str(elem[2]) for elem in display])
+                #print('display_str %s ' % display_str)
+                dhashval = hashlib.sha1(display_str.encode()).hexdigest()
+
+                # make a normalized version of the nvals
+                normalizer = min_ttl - 1
+                normalized_vals = [str(nvals[i] - normalizer)
+                        for i in range(len(nvals))]
+                normalized_vals_str = ', '.join(normalized_vals)
+                #print('normal_str %s ' % normalized_vals_str)
+                nhashval = hashlib.sha1(normalized_vals_str.encode()).hexdigest()
+
+            #real name for png file using normalized hash for prefix
+            out_name = str(nhashval) + ".png"
+            out_path = os.path.join(out_dir, out_name)
+            if(not os.path.isfile(out_path)):
+                grid.setFileName(out_path)
+                grid.build_image(display)
+                grid.render()
+
+            #trying to make the image directory more manageable
+            tstamp = datetime.fromtimestamp(values['start'])
+            #sorting by days
+            dirStr = tstamp.strftime('%Y-%m-%d')
+            #just create links in the days to point to actual png file
+            lnk_dir = os.path.join(os.path.abspath(self.dname),dirStr)
+            os.makedirs(lnk_dir, exist_ok=True)
+            lnk_path = os.path.join(lnk_dir,out_name)
+            if(not os.path.islink(lnk_path)):
+                os.symlink(out_path,lnk_path)
+
+            summary = '%s %s %s' % (
+                    out_path, str(values['src']), str(values['dst']))
+            summary += ' %s %s proto %s dport %s max_ttl %d min_ttl %d ttl_cnt %d pattern %s' % (
+                    values['start'], values['elapsed'], str(values['proto']), str(values['dport']), max_ttl, min_ttl,
+                    len(val2count), str(pattern_str))
+            summary += ' ' + dhashval
+            summary += ' ' + nhashval
+
+            print(summary)
+
+
+    @staticmethod
+    def get_array(line, ntype='int'):
+        """
+        Parse a text list of ints or floats into a Python list
+        """
+
+        line = re.sub(r'^.*\[', '', line)
+        line = re.sub(r'\].*$', '', line)
+        values = line.split(', ')
+
+        if ntype == 'int':
+            return [int(val) for val in values]
+        else:
+            return [float(val) for val in values]
+
+    def scan_record(self):
+        """
+        Parse a single record out of the input file,
+        and return a dictionary with entries for each
+        of the fields in the record.
+        """
+
+        # In this format, each record is represented by four
+        # lines of text.  The first is the "src" line, which
+        # contains metadata as key/value pairs.  The second
+        # is the offsets into the destination subnet for
+        # each probe.  The third is the offset time for each
+        # probe (relative to the first).  The fourth is the
+        # TTL of each probe.
+        #
+        # The entries of the second, third, and fourth lines
+        # are in order of arrival.
+        #
+        try:
+            src_line = self.fin.readline()
+            if not src_line:
+                return None
+            off_line = self.fin.readline()
+            if not off_line:
+                return None
+            times_line = self.fin.readline()
+            if not times_line:
+                return None
+            ttls_line = self.fin.readline()
+            if not ttls_line:
+                return None
+        except BaseException as exc:
+            print(exc)
+            return None
+
+        if not src_line or not off_line or not times_line or not ttls_line:
+            return None
+
+        values = dict()
+        elems = src_line.strip().split()
+        for elem in range(int(len(elems) / 2)):
+            # Try to convert the value to an int.  If that
+            # fails, then try to convert it to a double.
+            # If it's neither an int nor a double, we have
+            # problem...
+            #
+            try:
+                values[elems[2 * elem]] = int(elems[(2 * elem) + 1])
+            except ValueError:
+                values[elems[2 * elem]] = float(elems[(2 * elem) + 1])
+
+        values['src'] = ipaddress.IPv4Address(values['src'])
+        values['dst'] = ipaddress.IPv4Address(values['dst'])
+
+        values['offs'] = self.get_array(off_line, ntype='int')
+        values['times'] = self.get_array(times_line, ntype='float')
+        values['ttls'] = self.get_array(ttls_line, ntype='int')
+
+        return values
+
+
+def parse_args():
+    """
+    Parse the commandline
+    """
+
+    parser = ArgumentParser()
+
+    # TODO: more usage info
+
+    parser.add_argument(
+            '-d', dest='out_dname',
+            metavar='PATH', default='./images', type=str,
+            help='Path to the output images directory [default=%(default)s]')
+
+    parser.add_argument(
+            '-q', dest='no_ttl',
+            default=False, action='store_true',
+            help='Omit the TTLs from the images; only show the colors')
+
+    parser.add_argument(
+            '-I', dest='only_interesting',
+            default=False, action='store_true',
+            help='Only create output for "interesting" patterns')
+
+    parser.add_argument(
+            '-H', dest='include_hashval',
+            default=False, action='store_true',
+            help='Include hashvals of the ttl info in the summary')
+
+    parser.add_argument(
+            'scanfiles', metavar='FNAME', type=str, nargs='*',
+            help='Input scan files; stdin is used if FNAMEs are omitted')
+
+    args = parser.parse_args()
+
+    # TODO: check that the args are valid
+
+    return args
+
+
+def main():
+    """
+    Simple driver.  Could use a real commandline
+    and an informative usage message
+    """
+
+    args = parse_args()
+
+    if args.scanfiles:
+        for fname in args.scanfiles:
+            with open(fname, 'r') as fin:
+                scanner = ScanReader(
+                        fin, args.out_dname,
+                        not args.no_ttl, args.only_interesting,
+                        args.include_hashval)
+                scanner.process()
+    else:
+        scanner = ScanReader(
+                sys.stdin, args.out_dname,
+                not args.no_ttl, args.only_interesting,
+                args.include_hashval)
+        scanner.process()
+
+
+if __name__ == '__main__':
+    main()

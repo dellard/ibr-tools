@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+# Script to run via crontab every hour, to look for
+# for meanie output.  Assumes that zeek_cron_summ
+# has already run for the current hour.
+#
+# At the start of each day (in UTC), it looks for
+# the new Greenwich meanie port number, and checks
+# whether any of the networks we monitor have emitted
+# any meanie packets in the past hour.
+
+if [ $# -ne 1 ]; then
+    echo "ERROR: $0: no param file provided"
+    exit 1
+fi
+
+. "$1"
+if [ $? -ne 0 ]; then
+    echo "ERROR: $0: param file [$1] error"
+    exit 1
+fi
+
+PARAMFILE=$(readlink -f "$1")
+SCRIPTDIR=$(readlink -f $(dirname $0))
+
+if [ ! -x "$SCRIPTDIR"/zeek-find-meanie.sh ]; then
+    echo "ERROR: $0: zeek-find-meanie.sh missing"
+    exit 1
+fi
+
+if [ ! -x "$SCRIPTDIR"/zeek-extract-meanie-csv.sh ]; then
+    echo "ERROR: $0: zeek-extract-meanie-csv.sh missing"
+    exit 1
+fi
+
+LOGFILE="$HOME/interesting_log.txt"
+TEMPLOG="$HOME/curr-log.$$"
+
+new_meanie() {
+    local meanie=$(zcat "$ZEEK_CSVDIR"/"$ZEEK_DATANAME-$LOCALLASTDATE".csv.gz \
+	    | "$SCRIPTDIR"/zeek-find-meanie.sh)
+
+    echo $meanie $UTCLASTDATE >> "$ZEEK_MEANIE_PORTS"
+}
+
+NOWTS=$(date +%s)
+LOCALLASTDATE=$(date -d @$((NOWTS - 3600)) +%Y-%m-%d-%H)
+UTCLASTDATE=$(date -u -d @$((NOWTS - 3600)) +%Y-%m-%d)
+UTCLASTHOUR=$(date -u -d @$((NOWTS - 3600)) +%H)
+
+if [ "$UTCLASTHOUR" -eq 0 ]; then
+    new_meanie "$UTCLASTDATE" "$LOCALLASTDATE"
+fi
+
+"$SCRIPTDIR"/zeek-extract-meanie-csv.sh "$PARAMFILE"

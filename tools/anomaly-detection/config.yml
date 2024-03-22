@@ -1,0 +1,92 @@
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+
+# A parameter file for Timeframe Anomaly Clustering.ipynb
+
+# Set value to 1 to see intermediate outputs for debugging. 0 otherwise (recommended)
+debug: 0
+
+# Set value to 1 to save figures to output_dir_path. 0 otherwise
+save_figs: 1
+
+# Path where the figures are saved if saving figures is enabled in the previous parameter
+output_dir_path: /home/nice-user/anomaly-detection-results
+
+# Set value to 1 (recommended) to compute features. 0 otherwise 
+compute_features: 1
+
+# Full path and filename to the precomputed features 
+previous_features: /home/nice-user/anomaly-detection-results/pc-ex-2022-09-01-tcp.csv
+
+# Define which clustering algorithm you would like to use. The options are 'MeanShift', 'Agglomerative', and 'Spectral'
+clustering_alg: Agglomerative
+
+# Number of clusters. This value is required for Agglomerative clustering and Spectral clustering
+num_clusters: 15
+
+# This value is required for Agglomerative clustering 
+# It must be 'single', 'average', or 'complete' (default is 'average')
+linkage: complete
+
+#This value is required for MeanShift clustering 
+quantile: 0.125
+
+# The path to the input and output CSV files
+path_to_csv: /home/nice-user/csv/
+
+# Specify a list of input files to use
+csv_files: [ex-2023-07-01.csv]
+
+# Value to specify whether or not to save features
+save_features: 1
+
+# Specify where to save the principal component values
+output_file: pc-ex-2023-07-01-tcp.csv
+
+# Specify destination subnets for packets to look at
+destination_subnets: [10.33.25.0/24]
+
+# Specify the protocol for packets to look at
+# 6 for TCP, 17 for UDP, or 1 for ICMP
+traffic_type: 6
+
+# Maximum number of packets stored in memory
+max_states: 100
+
+# Number of packets to be used for interpolation
+interpolation_n: 100
+
+# If there are too many packets from each source in a cluster, 
+# this value gives the max number of packets that will be used per source 
+# in computing cluster distances and plotting
+limit_val: 200

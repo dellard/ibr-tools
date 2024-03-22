@@ -1,0 +1,6 @@
+builduser: dellard
+builddir: /u0/dellard/NICE/ibr-tools/utils
+hostname: proxy0
+buildtime: 20240112-1554-UTC
+git-branch: NICE-386-DISTAR
+git-commit: b8022b76dedb8de95032561cda9bad6732fb2e06

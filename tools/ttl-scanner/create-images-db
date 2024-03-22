@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+#######################################################################
+# Script to pull out information to create sql statements for database
+# insertion and create database
+#
+#  ./create-images-db -p output -o outDir /inputdir/scan-*summary.txt
+#
+#  Input: summary text files of scans with optional outputDir and prefix for
+#         output file names, i.e the sql file and the db name
+#  Output: prints sql statments to output.sql
+#          output.sql populates output.db
+#          default is to output in current directory
+#          or optionally outDir/output.sql outDir/output.db
+#
+#
+#
+########################################################################
+
+"""Script to create a database of symmetric images"""
+
+import argparse
+from argparse import RawTextHelpFormatter
+import subprocess
+from datetime import datetime
+
+def main():
+
+    uniq_hashes = set()
+
+    parser = argparse.ArgumentParser(formatter_class=RawTextHelpFormatter)
+    parser.add_argument('files', nargs='+', help='files to process')
+    parser.add_argument('-p', '--prefix', default='symImages',
+                        help='prefix for sql output file and db\
+                        \ndefaults to symImages.sql and symImages.db')
+    parser.add_argument('-o', '--outdir', default='.', help='output directory')
+    args_namespace = parser.parse_args()
+
+    # create filenames
+    sqlfn = args_namespace.outdir.rstrip("/")
+    sqlfn += "/" + args_namespace.prefix + ".sql"
+
+    dbfn = args_namespace.outdir.rstrip("/")
+    dbfn += "/" + args_namespace.prefix + ".db"
+
+    print("SQL statements written to " + sqlfn)
+
+    # open file to write sql statements
+    sql_conn = open(sqlfn, "w")
+
+    # input files to process - expecting basename to be summ-YYYY-MM-DD
+    # extract tstamp from there
+    summ_files = vars(args_namespace)['files']
+
+    sql_str = "--Tentative Schema to help with looking for instances of\n"
+    sql_str += "--interesting symmetrical images\n"
+    sql_conn.write(sql_str)
+
+    sql_str = "CREATE TABLE IF NOT EXISTS \"images\"\n"
+    sql_str += "(\n"
+    sql_str += "    [ImageId] INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\n"
+    sql_str += "    [Fname] TEXT NOT NULL,\n"
+    sql_str += "    [DHash] TEXT NOT NULL,\n"
+    sql_str += "    [NHash] TEXT NOT NULL,\n"
+    sql_str += "    [InterestVal] INT NOT NULL,\n"
+    sql_str += "    UNIQUE(DHash, NHash)\n"
+    sql_str += ");\n\n"
+    sql_conn.write(sql_str)
+
+    sql_str = "CREATE TABLE IF NOT EXISTS \"instances\"\n"
+    sql_str += "(\n"
+    sql_str += "    [InstanceId] INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\n"
+    sql_str += "    [Src] TEXT NOT NULL,\n"
+    sql_str += "    [Dst] TEXT NOT NULL,\n"
+    sql_str += "    [Proto] INTEGER NOT NULL,\n"
+    sql_str += "    [DPort] INTEGER NOT NULL,\n"
+    sql_str += "    [Tstamp] TEXT NOT NULL,\n"
+    sql_str += "    [Dur] REAL NOT NULL,\n"
+    sql_str += "    [ImageId] INTEGER,\n"
+    sql_str += "    [MinTTL] INTEGER NOT NULL,\n"
+    sql_str += "    [MaxTTL] INTEGER NOT NULL,\n"
+    sql_str += "    [NumTTLs] INTEGER NOT NULL,\n"
+    sql_str += "    [TTLs] JSON NOT NULL,\n"
+    sql_str += "    [DHash] TEXT NOT NULL,\n"
+    sql_str += "    [NHash] TEXT NOT NULL\n"
+    sql_str += ");\n\n"
+    sql_conn.write(sql_str)
+
+    sql_str = "CREATE TABLE IF NOT EXISTS \"patterns\"\n"
+    sql_str += "(\n"
+    sql_str += "    [PatternId] INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\n"
+    sql_str += "    [DHash] TEXT NOT NULL,\n"
+    sql_str += "    [NHash] TEXT NOT NULL,\n"
+    sql_str += "    [TTL] INTEGER NOT NULL,\n"
+    sql_str += "    [MLR_AB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_AC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_AD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_AnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_AnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_AnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_BC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_BnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_CD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_CnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_DB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MLR_DnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_AB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_AC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_AD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_AnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_AnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_AnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_BC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_BnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_CD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_CnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_DB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [MUD_DnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_AB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_AC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_AD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_AnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_AnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_AnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_BC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_BnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_CD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_CnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_DB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R180_DnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R270_AB] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_AC] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_AD] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_AnB] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_AnC] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_AnD] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_BC] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_BnC] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_CD] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_CnD] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_DB] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R270_DnB] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    [R90_AB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_AC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_AD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_AnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_AnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_AnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_BC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_BnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_CD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_CnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_DB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [R90_DnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_AC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_AB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_AD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_AnB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_AnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_AnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_BC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_BnC] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_CD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_CnD] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_DB] BOOLEAN DEFAULT 0, \n"
+    sql_str += "    [S_DnB] BOOLEAN DEFAULT 0,\n"
+    sql_str += "    UNIQUE(DHash, NHash, TTL)\n"
+    sql_str += ");\n"
+    sql_conn.write(sql_str)
+
+    for fname in summ_files:
+        # print ("Would do something with " + fname)
+
+        with open(fname, 'r') as fin:
+            for line in fin:
+                # print(line)
+
+                # getting image pattern substring
+                # initializing substrings
+                sub1 = "{"
+                # print("looking for + ", sub1)
+                sub2 = "}"
+                # print("looking for + ", sub2)
+                # getting index of substrings
+                idx1 = line.index(sub1)
+                # print("idx1 = ", idx1)
+                idx2 = line.index(sub2)
+                # print("idx2 = ", idx2)
+
+                fullpattern = ''
+                # getting elements in between
+                for idx in range(idx1 - 1 + len(sub1) + 1, idx2):
+                    fullpattern = fullpattern + line[idx]
+
+                # print("fullpattern = ", fullpattern)
+
+                subpatterns = fullpattern.split(", ")
+                # print(subpatterns)
+                count = 0
+
+                patdict = {}
+                for pat in subpatterns:
+                    # print(count, pat)
+                    count = count + 1
+
+                    # separate the TTL from the image string
+                    ttl, patterns = pat.split(":")
+                    # print(ttl, pt.replace("'", ""))
+                    # print("Res", pattern);
+                    # get the individual symmetry patterns
+                    pattern_cols = patterns.split(',')
+                    # print(pattern_cols)
+
+                    # put in a 1 for every pattern found
+                    update_str = ''
+                    for _ in pattern_cols:
+                        update_str += "1,"
+
+                    # remove extra trailing comma
+                    update_str = update_str[0:-1]
+                    # add in dictionary using the ttl as the key
+                    # deals with multiple TTLs for a given scan
+                    patdict[ttl] = [patterns.replace("'", "").strip(), update_str]
+
+                    # print(update_str)
+
+                # print(patdict)
+
+                columns = line.rstrip().split(' ')
+
+                ifname = columns[0]
+                src = columns[1]
+                dst = columns[2]
+                tstamp_str = columns[3]
+                tstamp = str(datetime.fromtimestamp(float(tstamp_str)))
+                duration = columns[4]
+                proto = columns[6]
+                dport = columns[8]
+                max_ttl = columns[10]
+                min_ttl = columns[12]
+                num_ttl = columns[14]
+                dhash = columns[-2]
+                nhash = columns[-1]
+
+                unique_hash_pair = dhash + "," + nhash
+                if unique_hash_pair not in uniq_hashes:
+                    uniq_hashes.add(unique_hash_pair)
+
+                    sql_string = "INSERT INTO images(Fname, DHash, NHash,InterestVal)"
+                    sql_string += " VALUES(\"" + ifname + "\",\"" + dhash
+                    sql_string += "\",\"" + nhash + "\",100);\n"
+                    sql_conn.write(sql_string)
+                    for key in patdict:
+                        sql_string = "INSERT INTO patterns(DHASH,NHASH,TTL,"
+                        sql_string += patdict[key][0] + ") VALUES(\""
+                        sql_string += dhash + "\",\"" + nhash + "\","
+                        sql_string += key + "," + patdict[key][1] + ");\n"
+                        sql_conn.write(sql_string)
+                # else:
+                #    print("Duplicate Hash Pair " + dhash + " " + nhash + "\n")
+
+                sql_string = "INSERT INTO instances(Src,Dst,Proto,DPort,Tstamp,Dur,"
+                sql_string += "ImageId,MinTTL,MaxTTL,NumTTLs,TTLs,DHash,NHash)"
+                sql_string += "VALUES(\"" + src + "\",\"" + dst + "\"," + proto
+                sql_string += "," + dport + ",\"" + tstamp + "\"," + duration + ","
+                sql_string += str(0) + "," + min_ttl + "," + max_ttl + ","
+                sql_string += num_ttl + "," + "json('[" + min_ttl + "," + max_ttl
+                sql_string += "]'),\"" + dhash + "\",\"" + nhash + "\");\n"
+                sql_conn.write(sql_string)
+
+    sql_string = "UPDATE instances SET ImageId = "
+    sql_string += "(SELECT ImageId FROM images WHERE "
+    sql_string += "images.NHash = instances.NHash and "
+    sql_string += "images.DHash = instances.DHash);\n"
+    sql_conn.write(sql_string)
+
+    sql_conn.close()
+
+    # create db
+    response = subprocess.Popen("sqlite3 " + dbfn + "<" + sqlfn, shell=True).wait()
+
+    # print(response)
+    if response == 0:
+        print(dbfn + " is created from " + sqlfn + ".")
+    else:
+        print("Failed to create " + dbfn)
+
+
+if __name__ == '__main__':
+    main()

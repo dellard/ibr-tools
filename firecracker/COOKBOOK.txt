@@ -1,0 +1,182 @@
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+FIRECRACKER EXAMPLES
+
+For these examples, we assume that the list of pcap files we use as
+input are in $PCAP.
+
+= EXAMPLE 1: Find the most common protocol/dport pair per five-minute interval =
+
+    firecracker -I 300 -m 1 $PCAP
+
+The "PA" query is the default, so we don't have to specify it
+explicitly.  You do need the "-I 300" to change the interval to five
+minutes (300 seconds).  The "-m 1" parameter says to just show the
+most common (the one with the highest count).
+
+
+The output looks like:
+
+      C,36512,start_time,1697846434,P,6,A,23
+      T,416203,start_time,1697846434,PA
+      C,35851,start_time,1697846734,P,6,A,23
+      T,458359,start_time,1697846734,PA
+      C,37264,start_time,1697847034,P,6,A,23
+      T,457221,start_time,1697847034,PA
+      C,36328,start_time,1697847334,P,6,A,23
+      T,458412,start_time,1697847334,PA
+      ...
+
+This is more information than you wanted, if all you want is to know
+the protocol/port combinations.  You can use a tool like awk to only
+look at the "C" lines, and extract just those fields.  
+
+    firecracker -I 300 -m 1 $PCAP | awk -F, '$1 == "C" {print $6, $8}'
+
+The output looks like:
+
+      6 23
+      6 23
+      6 23
+      6 23
+      ...
+
+More likely, however, you'd want to keep the timestamps as well:
+
+    firecracker -I 300 -m 1 $PCAP \
+        | awk -F, '$1 == "C" {print $4, $6, $8}'
+
+Note that you need to tell awk that the field separator for its input
+is a comma (with the "-F,") or else it won't correctly parse the
+columns.
+
+The output looks like:
+
+      1697846434 6 23
+      1697846734 6 23
+      1697847034 6 23
+      1697847334 6 23
+      ...
+
+
+= EXAMPLE 2: Total number of IBR packets per minute =
+
+    ./firecracker -I 60 -m 0 $PCAP
+
+If you don't have a query, but only want the count, then you can set
+the number of results to zero with "-m 0", and only the total "T"
+lines will be output.  (As you saw in the previous example, if you
+don't specify a query, firecracker will use the default "PA" query.)
+
+The output looks like:
+
+      T,80833,start_time,1697846434,PA
+      T,79181,start_time,1697846494,PA
+      T,86669,start_time,1697846554,PA
+      T,86064,start_time,1697846614,PA
+      ...
+
+(You can see from the query field of the total that firecracker is
+using the default query "PA".)
+
+As in the previous example, you probably don't want all of this
+information.  You can use awk to filter out everything except the
+total and the timestamp:
+
+    ./firecracker -I 60 -m 0 $PCAP | awk -F, '{print $4, $2}'
+
+The output looks like:
+
+      1697846434 80833
+      1697846494 79181
+      1697846554 86669
+      1697846614 86064
+
+You could feed this into a dashboard to watch for spikes in incoming
+IBR.
+
+= EXAMPLE 3: find the /24 subnet receiving the most packets =
+
+    ./firecracker -t D24 -m 1 $PCAP
+
+The output looks like:
+
+    C,146501,start_time,1696946400,D24,10.1.101.0/24
+    T,1143155,start_time,1696946400,D24
+    C,145513,start_time,1696947300,D24,10.1.101.0/24
+    T,1099892,start_time,1696947300,D24
+    C,108539,start_time,1696948200,D24,10.1.101.0/24
+    T,1123978,start_time,1696948200,D24
+    C,39137,start_time,1696949100,D24,10.1.101.0/24
+    T,1038487,start_time,1696949100,D24
+
+= EXAMPLE 4: find the single destination receiving the most packets =
+
+    ./firecracker -t D -m 1 $PCAP
+
+The output looks like:
+
+    C,105291,start_time,1696946400,D,10.1.101.127
+    T,1143155,start_time,1696946400,D
+    C,106462,start_time,1696947300,D,10.1.101.127
+    T,1099892,start_time,1696947300,D
+    C,64863,start_time,1696948200,D,10.1.101.127
+    T,1123978,start_time,1696948200,D
+    C,1930,start_time,1696949100,D,10.3.179.39
+    T,1038487,start_time,1696949100,D
+
+= EXAMPLE 5: find the source subnet sending the most packets to a given /24 subnet =
+
+Continuing from the previous example, you might want to find where all
+the packets addressed to 10.1.101.127 are sourced.  You might being by
+checking whether the source for these packets is localized to a
+specific /8 subnet.  This can be done by filtering the packets to
+discard any packets that don't have a destination of 10.1.101.127, and
+then querying by source /8:
+
+    ./firecracker -t S8 -F D=10.1.101.127 -m 1 $PCAP
+
+The output looks like:
+
+    C,11539,start_time,1696946400,S8,192.0.0.0/8
+    T,105291,start_time,1696946400,S8
+    C,10559,start_time,1696947300,S8,10.0.0.0/8
+    T,106462,start_time,1696947300,S8
+    C,6590,start_time,1696948200,S8,172.0.0.0/8
+    T,64863,start_time,1696948200,S8
+    C,30,start_time,1696949100,S8,192.0.0.0/8
+    T,134,start_time,1696949100,S8
+
+This result shows some locality, but not much: even the /8 that sent
+the most packets only sent less than 12% of the packets, and the /8
+that sent the most packets changed from one interval to the next.

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+# Script to run via crontab every hour, to grab the output
+# from zeek and find the IBR.
+
+SCRIPTDIR=$(readlink -f $(dirname $0))
+PNAME=$(basename "$0")
+
+if [ $# -ne 1 ]; then
+    echo "ERROR: $PNAME: no param file provided"
+    exit 1
+fi
+
+. "$1"
+if [ $? -ne 0 ]; then
+    echo "ERROR: $PNAME: param file [$1] error"
+    exit 1
+fi
+
+PARAMFILE=$(readlink -f "$1")
+
+if [ ! -x "$SCRIPTDIR"/zeek-find-ibr.sh ]; then
+    echo "ERROR: $PNAME: zeek-find-ibr.sh missing"
+    exit 1
+fi
+
+NOWTS=$(date +%s)
+LOCALLASTDATE=$(date -d @$((NOWTS - 3600)) +%Y-%m-%d-%H)
+UTCLASTDATE=$(date -u -d @$((NOWTS - 3600)) +%Y-%m-%d)
+UTCLASTHOUR=$(date -u -d @$((NOWTS - 3600)) +%H)
+
+"$SCRIPTDIR"/zeek-find-ibr.sh "$PARAMFILE"

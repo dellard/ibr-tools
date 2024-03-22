@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+#######################################################################
+# Script to pull out information to create sql statements for database
+# insertion and create database
+#
+#  ./create-scan-db -p prefix -o outDir /inputdir/scans*.txt
+#
+#  Input: text files of scans from
+#           ./pktshow "$PCAPDIR"/"Dates"-*.pcap.gz \
+#                    | python3 ./find-horiz-scans -t 600
+#
+#           pktshow takes pcap files and outputs packets that are fed into
+#           find-horiz-scans - the -t parameter is customizable
+#
+#           Optional: -p for output prefix for sql and db files
+#                     -o for output directory
+#  Output: prints to file output.sql used to populate output.db
+#          default is to output in current directory
+#          or optionally outDir/prefix.sql outDir/prefix.db
+#
+#
+#
+########################################################################
+
+"""Script to create a database of all /24 scans"""
+
+import argparse
+from argparse import RawTextHelpFormatter
+from datetime import datetime
+import ipaddress
+import subprocess
+
+
+def main():
+
+    parser = argparse.ArgumentParser(formatter_class=RawTextHelpFormatter)
+    parser.add_argument('files', nargs='+', help='files to process')
+    parser.add_argument('-p', '--prefix', default='fullNetScans',
+                        help='prefix for sql output file and db\
+                        \ncreating fullNetScans.sql and fullNetScans.db')
+    parser.add_argument('-o', '--outdir', default='.', help='output directory')
+    args_namespace = parser.parse_args()
+
+    # create filenames
+    sqlfn = args_namespace.outdir.rstrip("/")
+    sqlfn += "/" + args_namespace.prefix + ".sql"
+
+    dbfn = args_namespace.outdir.rstrip("/")
+    dbfn += "/" + args_namespace.prefix + ".db"
+
+    print("SQL statements written to " + sqlfn)
+
+    # open file to write sql statements
+    sql_conn = open(sqlfn, "w")
+
+    # input files to process - expecting basename to be summ-YYYY-MM-DD
+    # extract tstamp from there
+    summ_files = vars(args_namespace)['files']
+
+    sql_str = "--Tentative Schema to count /24 scans\n"
+    sql_conn.write(sql_str)
+
+    sql_str = "CREATE TABLE IF NOT EXISTS \"instances\"\n"
+    sql_str += "(\n"
+    sql_str += "    [InstanceId] INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,\n"
+    sql_str += "    [Src] TEXT NOT NULL,\n"
+    sql_str += "    [Dst] TEXT NOT NULL,\n"
+    sql_str += "    [Proto] INTEGER NOT NULL,\n"
+    sql_str += "    [DPort] INTEGER NOT NULL,\n"
+    sql_str += "    [Tstamp] TEXT NOT NULL,\n"
+    sql_str += "    [Dur] REAL NOT NULL,\n"
+    sql_str += "    [Cov] INTEGER NOT NULL,\n"
+    sql_str += "    [Cnt] INTEGER NOT NULL,\n"
+    sql_str += "    [Inv] INTEGER NOT NULL\n"
+    sql_str += ");\n\n"
+    sql_conn.write(sql_str)
+
+    for fname in summ_files:
+        # print ("Would do something with " + fname)
+
+        with open(fname, 'r') as fin:
+            for line in fin:
+
+                if line.startswith("src"):
+                    # print(line)
+                    columns = line.rstrip().split(' ')
+                    # print(columns)
+
+                    src = str(ipaddress.IPv4Address(int(columns[1])))
+                    dst = str(ipaddress.IPv4Address(int(columns[3])))
+                    tstamp_str = columns[15]
+                    tstamp = str(datetime.fromtimestamp(float(tstamp_str)))
+                    duration = columns[17]
+                    proto = columns[5]
+                    dport = columns[7]
+                    cov = columns[9]
+                    cnt = columns[11]
+                    inv = columns[13]
+
+                    sql_str = "INSERT INTO instances"
+                    sql_str += "(Src,Dst,Proto,DPort,Tstamp,Dur,Cov,Cnt,Inv)"
+                    sql_str += " VALUES(\"" + src + "\",\"" + dst + "\","
+                    sql_str += proto + "," + dport + ",\"" + tstamp + "\","
+                    sql_str += duration + "," + cov + "," + cnt + "," + inv
+                    sql_str += ");\n"
+                    sql_conn.write(sql_str)
+
+    sql_conn.close()
+
+    # create db
+
+    response = subprocess.Popen(
+            "sqlite3 " + dbfn + "<" + sqlfn, shell=True).wait()
+    # print(response)
+    if response == 0:
+        print(dbfn + " is created from " + sqlfn + ".")
+    else:
+        print("Failed to create " + dbfn)
+
+
+if __name__ == '__main__':
+    main()

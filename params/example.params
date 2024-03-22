@@ -1,0 +1,104 @@
+# Top-level parameters for the IBR collection and analysis tools.
+#
+# Used by scripts related to pcap ingestion and initial processing
+
+# DATANAME is the "name" of the dataset, which is used as part of the
+# input and output files created and/or used by these scripts.  For
+# example, the DATANAME for the 2020-2023 BBN IBR data set is "bbn", so
+# the pcap files have names like "bbn-2021-10-23-03.pcap".
+#
+# DATANAME can contain letters and numbers and limited punctuation, such
+# as hyphens and underscores.  DO NOT use characters that have special
+# meaning to the shell or common utilities (such as parentheses,
+# percent, period, comma, etc).
+#
+DATANAME="example"
+
+# DATASETROOTDIR is the path to the root of the data directory.
+#
+# Note that there doesn't need to be a single root, nor does the path to
+# the root need to include DATANAME.  The individual paths to each
+# subdirectory are defined below, and can be redefined as necessary for
+# your installation.
+#
+DATASETROOTDIR="/r/storage/$DATANAME"
+
+# RAWPCAPDIR is the directory where new pcaps are stored, BEFORE they've
+# been processed at all.
+#
+# PCAPDIR is the directory from which pcaps are taken for analysis.
+#
+# If RAWPCAPDIR is different from PCAPDIR, this signifies that the pcaps
+# must be filtered or transformed in some manner before they are
+# analyzed.  See pcap-ingestion/process.sh for more info.
+#
+RAWPCAPDIR="$DATASETROOTDIR/pcap-raw"
+PCAPDIR="$DATASETROOTDIR/pcap"
+
+# CSV3DIR is the directory where the initial CSV files created from the
+# pcap files are stored.
+#
+# FCSVDIR is the directory where the CSV files are taken for analysis.
+#
+# If CSV3DIR is different from FCSVDIR, this signifies that the initial
+# CSV files must be filtered or transformed in some manner before they
+# are analyzed.  If some transformation is necessary, FIXEDDIR is a
+# directory that can be used for any scratch files created during this
+# transformation.  See pcap-ingestion/process.sh for more info.
+#
+CSV3DIR="$DATASETROOTDIR/csv3"
+FCSVDIR="$DATASETROOTDIR/fcsv-new"
+FIXEDDIR="$DATASETROOTDIR/new-fixed"
+
+# SUBNETDIR is the directory where information is stored about the
+# destination subnets observed in each CSV file.
+#
+# TRENDDIR is the directory where the output from the "trend" analysis
+# is stored.
+#
+# MEANIEDIR is the directory where the output of the "meanie" analysis
+# is stored.
+#
+# FRAGMENTDIR is the directory where the output of the "fragment"
+# analysis is stored.
+#
+SUBNETDIR="$DATASETROOTDIR/subnets"
+TRENDDIR="$DATASETROOTDIR/trendy-output"
+MEANIEDIR="$DATASETROOTDIR/meanie-output"
+FRAGMENTDIR="$DATASETROOTDIR/fragments"
+
+# Subdirectories beneath $FRAGMENTDIR; these shouldn't be changed.
+#
+FRAG_PCAPOUTDIR="$FRAGMENTDIR/pcap"
+FRAG_CSVOUTDIR="$FRAGMENTDIR/csv"
+FRAG_RESULTDIR="$FRAGMENTDIR/results"
+
+# If DO_ACKSCANS is 1, then repeat some of the analyses for both
+# the set of acknowledged scanners and unacknowledged scanners, as
+# well as the complete set of sources.
+#
+DO_ACKSCANS=1
+
+# Many of the processing steps benefit from concurrency (i.e.  multicore
+# systems can process several input files concurrently, at least until
+# their I/O bandwidth is exhausted.
+#
+# Using a CONCUR of 6 is adequate for an mid-range processor with eight
+# cores and modest disk bandwidth.  If you have a more capable (or
+# slower) system, you might want to experiment with setting it higher
+# (or lower).
+#
+CONCUR=6
+
+# The following parameters are related to data capture:
+#
+# TIMEZONE - the timezone to use to express dates and times.  The
+# default is "", which means to use the default timezone of the host.
+# The recommended best practice is to use "UTC".
+#
+# IFACE - the Ethernet interface from which to capture packets.
+# Use the "route" or "ifconfig" to determine the name of the correct
+# interface.  There is no default for this parameter, because it
+# depends on the host and network configuration.
+
+TIMEZONE=""

@@ -1,0 +1,8 @@
+# A list of excluded source subnets, one per line, in CIDR notation.
+#
+# These are the subnets that may include the source of packets observed
+# by this telescope, but which should be ignored for any reason.
+#
+# In this example, we exclude 0.0.0.0/32, which is an illegal address.
+#
+0.0.0.0/32

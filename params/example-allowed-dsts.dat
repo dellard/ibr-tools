@@ -1,0 +1,8 @@
+# A list of included destination subnets, one per line, in CIDR notation.
+#
+# These are the subnets observed by this telescope.
+# For a simple example, this telescope observes two subnets:
+# 192.168.0.0/16 and 10.0.0.0/8.
+#
+192.168.0.0/16
+10.0.0.0/8

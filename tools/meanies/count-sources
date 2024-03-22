@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+"""
+Simple script to count the number of unique source addresses that
+send packets to the given destination subnet, given a set of CSV
+files to count.
+
+The first column of the CSV files is the saddr and the second is
+the daddr.  (both IPv4, and both in decimal or hex)
+"""
+
+import argparse
+import ipaddress
+
+
+def parse_args():
+    """
+    Parse the command line
+    """
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+            '-s', dest='subnet',
+            default='0.0.0.0/0', metavar='SUBNET',
+            help='Destination subnet to filter on [default=%(default)s')
+
+    parser.add_argument(
+            '-t', dest='tag',
+            default='', metavar='TAG',
+            help='Tag to append to each output line [default=%(default)s')
+
+    parser.add_argument(
+            '-x', dest='is_hex',
+            default=False, action='store_true',
+            help='Input addresses are in hex [default=%(default)s')
+
+    parser.add_argument(
+            dest='input_files', metavar='PATH', type=str, nargs='+',
+            help='Input CSV files')
+
+    args = parser.parse_args()
+    return args
+
+
+def find_fname_sources(fname, sources, min_addr, max_addr, is_hex):
+    """
+    Add all the sources for probes whose destination address falls
+    between min_addr and max_addr (inclusize), observed in the CSV
+    file fname, to the sources set.
+
+    The CSV input is assumed to have the saddr and daddr as the first
+    two columns; the other columns are ignored.
+
+    If is_hex is non-False, then interpret the source address as hex;
+    otherwise assume it is decimal.  Note that other notations (like
+    dotted quads) are NOT supported.
+    """
+
+    with open(fname) as fin:
+        for line in fin:
+            saddr, daddr, _rest = line.split(',', maxsplit=2)
+            if is_hex:
+                saddr = int(saddr, 16)
+                daddr = int(daddr, 16)
+            else:
+                saddr = int(saddr)
+                daddr = int(daddr)
+
+            if min_addr <= daddr <= max_addr:
+                sources.add(saddr)
+
+
+def main():
+    """
+    Count the number of unique source addresses that send probes
+    to the desired destination subnet, and print it
+    """
+
+    args = parse_args()
+
+    subnet = ipaddress.IPv4Network(args.subnet)
+    min_addr = int(subnet.network_address)
+    max_addr = min_addr + (subnet.num_addresses - 1)
+
+    all_sources = set()
+
+    for fname in args.input_files:
+        find_fname_sources(
+                fname, all_sources, min_addr, max_addr, args.is_hex)
+
+    print('%d%s' % (len(all_sources), args.tag))
+
+
+if __name__ == '__main__':
+    main()

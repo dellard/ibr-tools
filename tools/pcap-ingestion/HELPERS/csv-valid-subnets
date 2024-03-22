@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+SCRIPTDIR=$(dirname $(readlink -f "$0"))
+PARAMDIR=$(readlink -f "$SCRIPTDIR/../../../params")
+PNAME=$(basename "$0")
+
+if [ $# -gt 0 ]; then
+    if [ ! -r "$1" ]; then
+	echo "ERROR: $PNAME: cannot read parameter file [$1]"
+	exit 1
+    fi
+
+    . "$1"
+    if [ $? -ne 0 ]; then
+	echo "ERROR: $PNAME: bad parameter file [$1]"
+	exit 1
+    fi
+fi
+
+if [ -z ${DATANAME+x} ]; then
+    echo "ERROR: $PNAME: required variable DATANAME is not set"
+    exit 1
+fi
+
+if [ ! -f "$PARAMDIR/$DATANAME"-allowed-dsts.dat ]; then
+    echo "ERROR: $PNAME: no allowed-dsts file found in $PARAMDIR"
+    exit 1
+fi
+
+FILTER=$(readlink -f "$SCRIPTDIR"/../../../bin/filter-ip)
+
+ALLOWEDDSTS="$PARAMDIR/$DATANAME"-allowed-dsts.dat
+OMITTEDSRCS="$PARAMDIR/$DATANAME"-omitted-srcs.dat
+
+if [ ! -f "$OMITTEDSRCS" ]; then
+    "$FILTER" -r -n 2 "$ALLOWEDDSTS"
+else
+    "$FILTER" -r -n 2 "$ALLOWEDDSTS" | "$FILTER" -n 1 "$OMITTEDSRCS"
+fi

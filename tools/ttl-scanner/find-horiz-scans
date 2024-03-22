@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+# Run with pypy3 for better performance
+#
+# Based on find-fast-runs, but simplified to only track one value
+# (which will typically be the TTL, but it can another value).
+
+"""
+Find simple horizontal scans (scans with a single source, that scan
+completely through a subnet of a given size, within a given length
+of time) and print out some information about them, including the
+order in which the addresses in the subnet were probed, the timestamp
+of each probe, and the value of some field associated with the probe
+(typically the TTL, but this depends on the input).
+
+Input is CSV, in the format created by pktshow, read from stdin.
+"""
+
+from argparse import ArgumentParser
+import sys
+
+
+class HorizontalScan:
+    """
+    Tracks a candidate horizontal scan (until we can determine
+    whether it's a complete scan, or it times out)
+    """
+
+    def __init__(
+            self, saddr, dest_net, proto, dport, ts_start, name,
+            prefix_width=24, suffix_count=0):
+        self.saddr = saddr
+        self.dest_net = dest_net
+        self.proto = proto
+        self.dport = dport
+        self.name = name
+
+        self.ts_start = ts_start
+        self.ts_curr = ts_start
+
+        suffix_count = (1 << (32 - prefix_width))
+        self.suffix_mask = (suffix_count - 1)
+        self.prefix_mask = (0xffffffff & ~self.suffix_mask)
+
+        if suffix_count:
+            self.suffix_count = suffix_count
+
+        self.seen_offsets = set()
+
+        # Rather than use a list for each field in a probe,
+        # make a single list where each element in the list
+        # is a tuple of the fields.  This cuts down on the
+        # overhead, and also reduces the probability that
+        # when we add a new field we'll forget to add it
+        # somewhere...
+
+        self.probes = list()
+
+    def update(self, daddr, timestamp, value):
+        """
+        Add another probe to a candidate scan
+        """
+
+        self.ts_curr = timestamp
+
+        offset = daddr & self.suffix_mask
+
+        self.seen_offsets.add(offset)
+
+        self.probes.append((offset, timestamp, value))
+
+    def prune(self, min_ts):
+        """
+        Prune any probes that happened before min_ts, and update
+        all the fields to match
+
+        Returns 0 if nothing was done; 1 if some probes were
+        removed; 2 if all of the probes were removed and the
+        scan is voided (which shouldn't happen, but better safe
+        than sorry)
+        """
+
+        # if the earliest timestamp in the scan is after min_ts, then
+        # all of them are after min_ts, so there's nothing to do
+        #
+        if self.ts_start >= min_ts:
+            return 0
+
+        # Otherwise, we need to find the count of how many probes
+        # have aged out
+        #
+        cnt = 0
+        for probe in self.probes:
+            # NOTE: [1] is the timestamp
+            if probe[1] < min_ts:
+                cnt += 1
+            else:
+                break
+
+        # Note that in the extreme case, they might *all* have aged
+        # out (this shouldn't happen in the current program structure,
+        # but we want to be able to handle it
+        #
+        if cnt == len(self.probes):
+            # print('PRUNE: ALL PRUNED')
+            return 2
+
+        # print('PRUNE: PRUNE %d of %d' % (cnt, len(self.timestamps)))
+
+        # Deleting the head of the array is faster the making a copy
+        # via slicing
+        #
+        del self.probes[:cnt]
+        # print('PRUNE: aged out %d' % cnt)
+
+        return 1
+
+    def heuristic_prune(self):
+        """
+        Apply heuristics to prune candiate runs that appear to be
+        failing or are soaking up a lot of resources, which can
+        make the analysis very slow.  These "large, slow" candidates
+        have a low rate of success (they rarely become complete runs)
+        so they aren't particularly interesting to our analysis,
+        but they do gum things up.  Therefore we try to recognize them
+        and prune them back.
+
+        In most cases, however, we don't kill them (which would make
+        things even faster), just truncate them.
+        """
+
+        changed = False
+
+        # Heuristic 1: if a candidate has a lot more probes than it
+        # would need to complete a run, then chances are that it
+        # isn't make forward progress, or at least not fast enough.
+        # Remove its prefix.
+        #
+        # max_ratio is how long we'll let the list of probes get,
+        # over the minimum length required for a complete scan.
+        # So if suffix count is 256, and the max_ratio is 4, then
+        # if the number of probes is greater than 1024, then chop
+        # it back to 1024
+        #
+        # Note: max_ratio is chosen somewhat arbitrarily
+        #
+        max_ratio = 8
+        max_count = max_ratio * self.suffix_count
+        if len(self.probes) > max_count:
+            del self.probes[:-max_count]
+            changed = True
+
+        # NOTE: this is a hack to improve performance, but could alter
+        # the outcome in a few pathological cases.  If we have a sequence
+        # of probes that begin with a string of repeated probes to the same
+        # offset, then we can remove all but the last of them without breaking
+        # the run (or the run that might eventually exist).  For example,
+        # if [1, 1, 1, 1, 1, 2, 3 ...] is the start of a run, then
+        # [1, 2, 3 ...] is also the start of a run -- the extra "1"
+        # probes don't add anything.  There are a few cases where we
+        # see a blizzard of repeated probes, and they kill performance,
+        # so we want to remove them.  Although this does change the
+        # result if these blizzards are part of a run (which, it turns
+        # out, they have never been, in the current data), these runs
+        # are pathological and it's worth their loss.  There are a few
+        # runs, however, that have a small string of prefix duplicates,
+        # so we let them go (where "small" is currently 3 or fewer).
+        #
+        cnt = 0
+        probes = self.probes
+        while ((len(probes) > (cnt + 1)) and
+                (probes[cnt][0] == probes[cnt + 1][0])):
+            cnt += 1
+
+        if cnt > 3:
+            del self.probes[:cnt]
+            changed = True
+
+        if changed:
+            self.fix_after_pruning()
+
+        return changed
+
+    def fix_after_pruning(self):
+        """
+        After pruning, we need to fix the timestamps and update seen_offsets
+        """
+
+        # NOTE: [1] is the timestamp
+        self.ts_start = self.probes[0][1]
+        self.ts_curr = self.probes[-1][1]
+        # Instead of trying to be clever, just rebuild the set of
+        # seen offsets from scratch
+        #
+        self.seen_offsets = set()
+        for probe in self.probes:
+            self.seen_offsets.add(probe[0])
+
+    def check(self, max_elapsed=120):
+        """
+        Check whether a run is complete, or has aged out
+
+        Returns a negative number if the run should be abandoned
+        (because it took too long, or any other reason).
+
+        Returns a positive, non-zero number if the run is complete.
+        Returns 1 if the run contains exactly SUFFIX_COUNT elements,
+        or 2 if the run contains "extra" elements.
+
+        Returns 0 if the run is still a candidate.
+        """
+
+        # if the run doesn't have enough unique elements,
+        # then it can't be complete yet, so return 0.
+        # (it might be hopeless, but we determine that
+        # elsewhere)
+        #
+        if len(self.seen_offsets) < self.suffix_count:
+            return 0
+
+        # OK, we have a run that looks like it MIGHT
+        # be a successful candidate: try pruning it
+        # by time, and then check again to make sure
+        # that enough probes survived the pruning
+        #
+        if self.prune(self.ts_curr - max_elapsed) > 0:
+            self.fix_after_pruning()
+
+        if len(self.seen_offsets) < self.suffix_count:
+            return 0
+
+        if len(self.seen_offsets) == self.suffix_count:
+            if len(self.probes) == self.suffix_count:
+                return 1
+            else:
+                return 2
+        else:
+            # This can't happen, but Python doesn't know that.
+            return 0
+
+    def summary(self):
+        """
+        Return a text representation of the summary of the run
+
+        Right now we're not interested in many aspects of each run,
+        so we don't print very much info
+        """
+
+        elapsed = self.ts_curr - self.ts_start
+
+        inv = self.count_inversions()
+
+        sum1 = ('src %d dst %d proto %d dport %d ' % (
+                self.saddr, self.dest_net, self.proto, self.dport))
+
+        sum2 = ('cov %d cnt %d inv %d start %f elapsed %f' % (
+                len(self.seen_offsets), len(self.probes),
+                inv, self.ts_start, elapsed))
+
+        offsets = str([probe[0] for probe in self.probes])
+        times = str([int(1000 * (probe[1] - self.ts_start))/1000
+                for probe in self.probes])
+        values = str([probe[2] for probe in self.probes])
+
+        sum3 = 'OFFS %s\nTIMES %s\n%sS %s' % (
+                offsets, times, self.name, values)
+
+        return '%s%s\n%s' % (sum1, sum2, sum3)
+
+    def count_inversions(self):
+        """
+        Count the number of inversions necessary to completely sort
+        the offsets.
+
+        The easiest way to compute this is to bubble-sort an array of
+        the offsets and count the number of swaps we have to do... so
+        that's exactly what we do.
+        """
+
+        # Make a copy of the offsets list, which we can safely
+        # sort without clobbering the original order of offsets
+        #
+        # NOTE: [0] is the index for offset
+        offsets = [probe[0] for probe in self.probes]
+
+        inv = 0
+        for i in range(len(offsets) - 1):
+            for j in range(i + 1, len(offsets), 1):
+                if offsets[i] > offsets[j]:
+                    offsets[i], offsets[j] = offsets[j], offsets[i]
+                    inv += 1
+
+        return inv
+
+
+class HorizontalScanTracker:
+
+    def __init__(self, prefix_width=24, max_elapsed=120):
+        self.src2run = dict()
+
+        # This is the same logic as in HorizontalScan, but
+        # it's awkward to share the logic
+        #
+        self.prefix_width = prefix_width
+        self.suffix_count = (1 << (32 - prefix_width))
+        self.suffix_mask = (self.suffix_count - 1)
+        self.prefix_mask = (0xffffffff & ~self.suffix_mask)
+
+        self.max_elapsed = max_elapsed
+        self.last_scrub = 0
+
+    def update(
+            self, saddr, daddr, proto, dport, timestamp, value, name):
+        """
+        Update the scan for the given source/proto/dport, or create
+        one if there isn't one already (and then update it)
+        """
+
+        dest_net = daddr & self.prefix_mask
+
+        tag = (saddr, dest_net, proto, dport)
+
+        if tag not in self.src2run:
+            self.src2run[tag] = HorizontalScan(
+                    saddr, dest_net, proto, dport, timestamp, name,
+                    prefix_width=self.prefix_width,
+                    suffix_count=self.suffix_count)
+
+        run = self.src2run[tag]
+        run.update(daddr, timestamp, value)
+        status = run.check(max_elapsed=self.max_elapsed)
+        if status < 0:
+            del self.src2run[tag]
+        elif status > 0:
+            print(run.summary())
+            del self.src2run[tag]
+
+        self.scrub(timestamp)
+
+    def update_csv(self, csv):
+        """
+        Do an update from a CSV string
+        """
+
+        elems = csv.strip().split(',', maxsplit=16)
+
+        saddr = int(elems[0])
+        daddr = int(elems[1])
+        # sport = int(elems[2])
+        dport = int(elems[3])
+        proto = int(elems[4])
+        timestamp = float(elems[5])
+        # pktlen = int(elems[6])
+        value = int(elems[7])
+        name = elems[8]
+
+        self.update(saddr, daddr, proto, dport, timestamp, value, name)
+
+    def scrub(self, timestamp):
+        """
+        Remove any scan candidates that have timed out, but
+        which haven't received any probes since they timed
+        out.  This is important because the number of partial
+        scans (for example, oncelers) can be enormous and
+        they soak up a large amount of space.
+        """
+
+        # Only do this when at least 2 * max_elapsed seconds
+        # have gone by since the last time we did a
+        # scrub.  There's no point in scrubbing too often.
+
+        if (timestamp - self.last_scrub) < (2 * self.max_elapsed):
+            return
+
+        self.last_scrub = timestamp
+
+        oldest_permitted = timestamp - self.max_elapsed
+        dead = list()
+
+        for tag, val in self.src2run.items():
+            if val.ts_curr < oldest_permitted:
+                dead.append(tag)
+            else:
+                val.heuristic_prune()
+
+        for tag in dead:
+            del self.src2run[tag]
+
+
+def parse_args():
+    """
+    Parse the commandline
+    """
+
+    parser = ArgumentParser()
+
+    parser.add_argument(
+            '-t', dest='max_time',
+            metavar='SECS', default=600, type=int,
+            help='Maximum time for a run [default=%(default)d]')
+    parser.add_argument(
+            '-w', dest='prefix_width',
+            metavar='WIDTH', default=24, type=int,
+            help='Prefix width of the subnet [default=%(default)d]')
+
+    return parser.parse_args()
+
+
+def main(args):
+    """
+    Run the find-horiz-scan program.
+    """
+
+    args = parse_args()
+
+    if args.max_time < 1:
+        print("ERROR: %s: max_time must be >= 1" % sys.argv[0])
+        sys.exit(1)
+
+    if (args.prefix_width > 28) or (args.prefix_width < 16):
+        print("ERROR: %s: prefix_width must be 16..28" % sys.argv[0])
+        sys.exit(1)
+
+    tracker = HorizontalScanTracker(
+            prefix_width=args.prefix_width,
+            max_elapsed=args.max_time)
+
+    for line in sys.stdin:
+        tracker.update_csv(line)
+
+
+if __name__ == '__main__':
+    main(sys.argv)

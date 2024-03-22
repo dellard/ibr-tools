@@ -1,0 +1,11 @@
+p25.o: p25.c firecracker.h
+c25.o: c25.c firecracker.h
+fc5.o: fc5.c firecracker.h
+input.o: input.c firecracker.h
+process.o: process.c firecracker.h
+print.o: print.c firecracker.h
+filter.o: filter.c firecracker.h
+chain.o: chain.c firecracker.h
+firecracker.o: firecracker.c firecracker.h
+test_p25.o: test_p25.c firecracker.h
+test_c25.o: test_c25.c firecracker.h

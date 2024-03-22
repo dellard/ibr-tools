@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+
+# CODEMARK: nice-ibr
+#
+# Copyright (C) 2020-2024 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+# either express or implied. See the License for the specific
+# language governing permissions and limitations under the License.
+#
+# Distribution Statement "A" (Approved for Public Release,
+# Distribution Unlimited).
+#
+# This material is based upon work supported by the Defense
+# Advanced Research Projects Agency (DARPA) under Contract No.
+# HR001119C0102.  The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of DARPA.
+#
+# In the event permission is required, DARPA is authorized to
+# reproduce the copyrighted material for use as an exhibit or
+# handout at DARPA-sponsored events and/or to post the material
+# on the DARPA website.
+#
+# CODEMARK: end
+
+"""
+Find the port for the given protocol that has the largest number of
+"unique" sources (see below for a definition of what we mean by
+"unique" in this context) for the given span of time for a given
+set of subnets.
+
+The purpose of this program is primarily to find the UDP port
+in use during a given 24-hour period by a phenomenon we've informally
+named "the big source" or "the Greenwich Meanie".  What we see
+is that there has been, for the past few years (at least -- but we
+don't have data older than that) there has been one UDP port that
+is associated with a very large numer of sources each day, and
+this port changes exactly at 00:00 UTC.  The port number appears
+to be random.  Each source sends only a handful of packets, so the
+total number of packets is not large, but the number of distinct
+sources is.  The sources appear to be spread across the entire
+populated IPv4 space, and within a 24-hour period we see tens of
+thousands of them in our darkspace.
+
+Note that we also see other phenomenon where an unusually large
+number of sources sends a sequence of probes for a specific
+protocol/port into our darkspace.  In the past, these scans are
+different from the Greenwich Meanie because the sources, although
+numerous, tend to be clustered in a relatively small set of subnets.
+(For example, some of these scans appear to original from all of the
+addresses in a set of four /22 subnets.)  In order to avoid mistaking
+one of these scans with what we're looking for, we allow the user
+to specify a prefix mask length which is applied to the source
+addresses before comparing them.  By default this prefix length is
+24, so multiple sources within the same /24 will be treated as a
+single source.  This will reduce the number of apparent sources
+by a factor of as much as 256 for the highly clustered sources,
+but will have a very small effect on the number of apparent
+sources for the Greenwich Meanie.
+
+NOTE: this runs much faster with pypy3 than the default Python 3.8
+on Ubuntu 20.04, but not all platforms have pypy3, and some (like
+macos) have broken versions, so use pypy3 where you can, and Python3
+where you must.
+"""
+
+import argparse
+import gzip
+import struct
+import sys
+
+import dpkt
+
+
+class PcapReader:
+    """
+    Read a pcap file and count the number of sources
+    per protocol/dport tuple
+    """
+
+    def __init__(self, prefix_mask=0xffffff00, protocol=17):
+
+        self.prefix_mask = prefix_mask
+        self.protocol = protocol
+
+        self.seen_dports = dict()
+        self.dport_counts = dict()
+
+    def process_pkt(self, pkt_eth):
+        """
+        Process a single packet
+        """
+
+        # If it isn't IPv4, toss it
+        #
+        if pkt_eth.type != dpkt.ethernet.ETH_TYPE_IP:
+            return None
+
+        pkt_ip = pkt_eth.data
+        ip_proto = -1
+        ip_src = -1
+        dport = -1
+
+        # TODO: should check for fragments here.  Right now
+        # we aren't interested in fragments; ignore them
+
+        try:
+            ip_proto = pkt_ip.p
+
+            # If it's not the protocol we're looking for,
+            # we're done with this packet
+            #
+            if ip_proto != self.protocol:
+                return None
+
+            if ip_proto == dpkt.ip.IP_PROTO_TCP:
+                dport = pkt_ip.tcp.dport
+            elif ip_proto == dpkt.ip.IP_PROTO_UDP:
+                dport = pkt_ip.udp.dport
+            elif ip_proto == dpkt.ip.IP_PROTO_ICMP:
+                # The ICMP type is analogous to a destination port,
+                # sort of
+                dport = pkt_ip.icmp.type
+            else:
+                # Whatever it is, we don't care about it;
+                # we're done with this packet
+                #
+                return None
+
+            ip_src, = struct.unpack('!I', pkt_ip.src)
+
+        except BaseException as exc:
+            sys.stderr.write('bad pkt: %s' % str(exc))
+            return None
+
+        ip_src &= self.prefix_mask
+
+        if dport not in self.seen_dports:
+            self.seen_dports[dport] = set()
+            self.dport_counts[dport] = 0
+
+        self.seen_dports[dport].add(ip_src)
+        self.dport_counts[dport] += 1
+
+        return None
+
+    def process_file(self, in_file):
+
+        pcap_fin = dpkt.pcap.Reader(in_file)
+
+        for _timestamp, packet in pcap_fin:
+            try:
+                pkt_eth = dpkt.ethernet.Ethernet(packet)
+                self.process_pkt(pkt_eth)
+
+            except IndexError as exc:
+                sys.stderr.write('Failed to parse packet\n')
+                sys.stderr.write(str(exc) + '\n')
+
+    def get_counts(self):
+
+        counts = dict()
+
+        for dport, srcs in self.seen_dports.items():
+            counts[dport] = len(srcs)
+
+        return counts
+
+
+class CsvReader(PcapReader):
+
+    def __init__(self, prefix_mask=0xffffff00, protocol=17):
+        super().__init__(prefix_mask=prefix_mask, protocol=protocol)
+
+    def process_row(self, row):
+        fields = row.split(',', maxsplit=6)
+        ip_src = int(fields[0])
+        ip_proto = int(fields[2])
+        dport = int(fields[4])
+
+        # If it's not the protocol we're looking for,
+        # we're done with this packet
+        #
+        if ip_proto != self.protocol:
+            return None
+
+        ip_src &= self.prefix_mask
+
+        if dport not in self.seen_dports:
+            self.seen_dports[dport] = set()
+            self.dport_counts[dport] = 0
+
+        self.seen_dports[dport].add(ip_src)
+        self.dport_counts[dport] += 1
+
+        return None
+
+    def process_file(self, in_file):
+
+        for line in in_file:
+            self.process_row(line)
+
+
+def parse_args():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+            '-c', dest='use_csv',
+            action='store_true', default=False,
+            help='Use CSV input instead of pcap')
+
+    parser.add_argument(
+            '-l', dest='prefix_len',
+            metavar='PREFIXLEN', type=int, default=24,
+            help='Source address prefix mask length [default=%(default)%d')
+
+    parser.add_argument(
+            '-n', dest='show_n',
+            metavar='NUM', type=int, default=1,
+            help='Show the top NUM results [default=%(default)%d, -1 for all')
+
+    parser.add_argument(
+            '-p', dest='protocol',
+            metavar='PROTOCOL', type=str, default='udp',
+            help='IPv4 protocol [default=%(default)%s')
+
+    parser.add_argument(
+            '-t', dest='tag',
+            metavar='STR', type=str, default='',
+            help='Tag to append to every output line [default=%(default)%s')
+
+    parser.add_argument(
+            dest='input_files',
+            metavar='FNAME', nargs='+',
+            help='input files')
+
+    args = parser.parse_args()
+
+    if args.protocol == 'udp':
+        args.protocol = 17
+    elif args.protocol == '6':
+        args.protocol = 6
+    elif args.protocol == 'icmp':
+        args.protocol = 1
+    else:
+        print('ERROR: protocol must be one of udp, tcp, or icmp')
+        sys.exit(1)
+
+    if args.prefix_len < 0 or args.prefix_len > 32:
+        print('ERROR: prefix length must be 0..32')
+        sys.exit(1)
+
+    if '-' in args.input_files and len(args.input_files) > 1:
+        print('ERROR: stdin must be used alone')
+        sys.exit(1)
+
+    if args.show_n < 0:
+        args.show_n = -1
+
+    # TODO: more sanity and error checking here
+
+    return args
+
+
+def meanie_metric(src_count, pkt_cnt):
+    """
+    Calculate a metric for how meanie-like a given port is.
+
+    Not used yet.
+
+    This is a work in progress.  The current heuristic is
+    to simply return the number of sources, but we can also
+    consider the ratio of total number of packets to the
+    number of sources for that port, because meanie sources
+    send very few packets, so this will be a small number,
+    typically near 1, for the darkspace size we have,
+    while ordinary scanners will have a ratio of somewhere
+    from dozens to thousands.
+
+    Unfortunately, the expected value of this ratio depends
+    on the size of the darkspace, which in our case varies
+    over time, making this a difficult heuristic to use.
+    """
+
+    return src_count
+
+
+def main():
+
+    args = parse_args()
+
+    prefix_mask = 0xffffffff & ~((1 << (32 - args.prefix_len)) - 1)
+
+    if args.use_csv:
+        reader = CsvReader(prefix_mask=prefix_mask, protocol=args.protocol)
+        mode = 'rt'
+    else:
+        reader = PcapReader(prefix_mask=prefix_mask, protocol=args.protocol)
+        mode = 'rb'
+
+    for fname in args.input_files:
+        if fname == '-':
+            if mode == 'rt':
+                fin = sys.stdin
+            else:
+                fin = sys.stdin.buffer
+        elif fname.endswith('.gz'):
+            fin = gzip.open(fname, mode=mode)
+        else:
+            fin = open(fname)
+
+        reader.process_file(fin)
+
+    dport2count = reader.get_counts()
+    scores = [(dport, (count, reader.dport_counts[dport]))
+        for dport, count in dport2count.items()]
+
+    def get_metric(score):
+        return score[1]
+
+    scores = sorted(scores, key=get_metric, reverse=True)
+    if len(scores) == 0:
+        # Handle days when there's zero data
+        return
+
+    # We'll let the user ask for no output (show_n == 0),
+    # if they just want to run this program without seeing
+    # any results...
+    #
+    if args.show_n < 0:
+        args.show_n = len(scores)
+
+    proto = reader.protocol
+    if args.tag:
+        tag = ' tag ' + args.tag
+    else:
+        tag = ''
+
+    for i in range(args.show_n):
+        dport, _metric = scores[i]
+        nsrcs = len(reader.seen_dports[dport])
+        npkts = reader.dport_counts[dport]
+        ratio = npkts / nsrcs
+        print(
+                'n %d dport %d proto %d nsrcs %d npkts %d p/s %.5f plen %d%s' %
+                (i + 1, dport, proto, nsrcs, npkts, ratio,
+                    args.prefix_len, tag))
+
+
+if __name__ == '__main__':
+    main()
